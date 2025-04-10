@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>X-ray Image Calibration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .viewer-container {
+            width: 100%;
+            height: 600px;
+            position: relative;
+            background-color: #000;
+            border-radius: 8px;
+            overflow: hidden;
+        }
+        #cornerstoneViewport {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            color: white;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+        }
+        button {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background-color 0.3s;
+        }
+        #loadButton {
+            background-color: #007bff;
+            color: white;
+        }
+        #loadButton:hover {
+            background-color: #0056b3;
+        }
+        #calibrateButton {
+            background-color: #28a745;
+            color: white;
+        }
+        #calibrateButton:hover {
+            background-color: #218838;
+        }
+        #calibrateButton:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .tool-buttons {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .tool-button {
+            background-color: #6c757d;
+            color: white;
+        }
+        .tool-button:hover {
+            background-color: #5a6268;
+        }
+        .tool-button.active {
+            background-color: #28a745;
+        }
+        .status {
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .success {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .error {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .info-text {
+            color: #6c757d;
+        }
+        .slider-container {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .slider-container label {
+            width: 120px;
+        }
+        .slider-container input {
+            flex-grow: 1;
+        }
+        #calibratedImageContainer {
+            margin-top: 20px;
+            display: none;
+        }
+        #calibratedImage {
+            max-width: 100%;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .calibrated-title {
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+    <h1>X-ray Image Calibration</h1>
+    <div class="controls">
+        <input type="file" id="fileInput" accept="image/*" style="display: none;">
+        <button id="loadButton" onclick="document.getElementById('fileInput').click()">Load X-ray Image</button>
+        <button id="detectCircleButton" onclick="detectCircle()" disabled>Detect Circle</button>
+        <button id="calibrateButton" onclick="calibrateImage()" disabled>Calibrate</button>
+    </div>
+    <div class="container">
+        <div class="viewer-container">
+            <div id="cornerstoneViewport"></div>
+        </div>
+        <div class="status" id="statusContainer">
+            <p class="info-text">Please load an X-ray image to begin.</p>
+        </div>
+        <div id="calibratedImageContainer">
+            <p class="calibrated-title">Calibrated Image (17mm reference)</p>
+            <img id="calibratedImage" alt="Calibrated Image">
+        </div>
+    </div>
+
+    <!-- Only load the core Cornerstone library from a reliable CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/cornerstone-core@2.6.1/dist/cornerstone.min.js"></script>
+
+    <script>
+       
+        // Global variables
+        let element;
+        let originalImage = null;
+        let currentImage = null;
+        let activeTool = 'windowLevel';
+        let isDragging = false;
+        let lastX = 0, lastY = 0;
+        let scale = 1.0;
+        let offsetX = 0, offsetY = 0;
+        let windowWidth = 255;
+        let windowCenter = 128;
+        let isInverted = false;
+        let detectedCircle = null;
+        let pixelSpacingMM = null;
+        
+        // Global variables to track circle detection state
+        let isDetectingCircle = false;
+        let circleOverlay = null;
+        let circleCanvas = null;
+        let circlePoints = [];
+        let clickHandler = null;
+        
+        // Known real-world size of the circle in mm
+        const CIRCLE_REAL_SIZE_MM = 17;
+    </script>
+
+    <script>
+
+        // Initialize the viewer
+        document.addEventListener('DOMContentLoaded', function() {
+            // Get the Cornerstone viewport element
+            element = document.getElementById('cornerstoneViewport');
+            
+            // Enable the element for Cornerstone
+            cornerstone.enable(element);
+            
+            // Initialize file input handler
+            const fileInput = document.getElementById('fileInput');
+            fileInput.addEventListener('change', handleFileSelect);
+            
+            // Display initial message
+            displayMessage('Please load an X-ray image');
+            
+            // Update tool buttons
+            updateToolButtons();
+        });
+
+        // Handle file selection
+        function handleFileSelect(event) {
+            const file = event.target.files[0];
+            if (!file) return;
+
+            // Check if the file is an image
+            if (!file.type.startsWith('image/')) {
+                updateStatus('Error: Please select a valid image file.', 'error');
+                return;
+            }
+
+            updateStatus('Loading image...', 'info-text');
+            
+            // Create a URL for the image
+            const imageUrl = URL.createObjectURL(file);
+            
+            // Load the image using the URL
+            loadAndDisplayImage(imageUrl, file.name);
+        }
+
+        // Load and display the image
+        function loadAndDisplayImage(imageUrl, fileName) {
+            // Create a new Image object
+            const image = new Image();
+            
+            image.onload = function() {
+                try {
+                    // Create a canvas to draw the image
+                    const canvas = document.createElement('canvas');
+                    canvas.width = image.width;
+                    canvas.height = image.height;
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Draw the image on the canvas
+                    ctx.drawImage(image, 0, 0);
+                    
+                    // Get the image data
+                    const imageData = ctx.getImageData(0, 0, image.width, image.height);
+                    
+                    // Convert to grayscale for X-ray
+                    const grayscaleData = convertToGrayscale(imageData);
+                    
+                    // Store the original image data
+                    originalImage = {
+                        pixelData: grayscaleData,
+                        width: image.width,
+                        height: image.height,
+                        imageData: imageData
+                    };
+                    
+                    // Reset view parameters
+                    resetViewParameters();
+                    
+                    // Calculate scale to fit the image in the viewport
+                    const viewportElement = document.querySelector('.viewer-container');
+                    const viewportWidth = viewportElement.clientWidth;
+                    const viewportHeight = viewportElement.clientHeight;
+                    
+                    // Calculate scale to fit the image
+                    const scaleX = viewportWidth / image.width;
+                    const scaleY = viewportHeight / image.height;
+                    scale = Math.min(scaleX, scaleY);
+                    
+                    // Create and display the cornerstone image
+                    currentImage = createCornerstoneImage(grayscaleData, image.width, image.height);
+                    
+                    // Display the image
+                    cornerstone.displayImage(element, currentImage);
+                    
+                    // Apply the calculated scale to fit the image
+                    cornerstone.setViewport(element, {
+                        scale: scale,
+                        translation: {
+                            x: 0,
+                            y: 0
+                        }
+                    });
+                    
+                    // Enable the detect circle button
+                    document.getElementById('detectCircleButton').disabled = false;
+                    
+                    // Disable the calibrate button until a circle is detected
+                    document.getElementById('calibrateButton').disabled = true;
+                    
+                    // Hide the calibrated image container
+                    document.getElementById('calibratedImageContainer').style.display = 'none';
+                    
+                    // Reset detected circle
+                    detectedCircle = null;
+                    pixelSpacingMM = null;
+                    
+                    // Update status
+                    updateStatus(`X-ray image loaded successfully: ${fileName} (${image.width}x${image.height})`, 'success');
+                } catch (error) {
+                    console.error(error);
+                    updateStatus(`Error processing image: ${error.message}`, 'error');
+                }
+            };
+            
+            image.onerror = function() {
+                updateStatus('Error: Failed to load the image.', 'error');
+            };
+            
+            // Set the source of the image
+            image.src = imageUrl;
+        }
+
+        // Convert RGBA image data to grayscale
+        function convertToGrayscale(imageData) {
+            const rgbaData = imageData.data;
+            const width = imageData.width;
+            const height = imageData.height;
+            const grayscaleData = new Uint8Array(width * height);
+            
+            // Convert RGBA to grayscale
+            for (let i = 0, j = 0; i < rgbaData.length; i += 4, j++) {
+                // Use standard luminance formula: 0.299R + 0.587G + 0.114B
+                grayscaleData[j] = Math.round(
+                    0.299 * rgbaData[i] + 
+                    0.587 * rgbaData[i + 1] + 
+                    0.114 * rgbaData[i + 2]
+                );
+            }
+            
+            return grayscaleData;
+        }
+
+        // Create a cornerstone image object from grayscale data
+        function createCornerstoneImage(pixelData, width, height) {
+            // Apply window/level and inversion if needed
+            const processedData = applyImageProcessing(pixelData);
+            
+            // Create and return the cornerstone image object
+            return {
+                imageId: 'xrayImage',
+                minPixelValue: 0,
+                maxPixelValue: 255,
+                slope: 1.0,
+                intercept: 0,
+                windowCenter: windowCenter,
+                windowWidth: windowWidth,
+                getPixelData: function() {
+                    return processedData;
+                },
+                rows: height,
+                columns: width,
+                height: height,
+                width: width,
+                color: false,
+                columnPixelSpacing: 1,
+                rowPixelSpacing: 1,
+                invert: isInverted,
+                sizeInBytes: width * height,
+                getCanvas: function() {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    const imgData = ctx.createImageData(width, height);
+                    
+                    // Convert grayscale to RGBA
+                    for (let i = 0, j = 0; i < processedData.length; i++, j += 4) {
+                        const value = processedData[i];
+                        imgData.data[j] = value;
+                        imgData.data[j + 1] = value;
+                        imgData.data[j + 2] = value;
+                        imgData.data[j + 3] = 255; // Alpha
+                    }
+                    
+                    ctx.putImageData(imgData, 0, 0);
+                    return canvas;
+                }
+            };
+        }
+
+        // Apply window/level and inversion to pixel data
+        function applyImageProcessing(originalData) {
+            if (!originalData) return null;
+            
+            const processedData = new Uint8Array(originalData.length);
+            const lower = windowCenter - windowWidth / 2;
+            const upper = windowCenter + windowWidth / 2;
+            
+            for (let i = 0; i < originalData.length; i++) {
+                let value = originalData[i];
+                
+                // Apply window/level
+                if (value <= lower) {
+                    value = 0;
+                } else if (value >= upper) {
+                    value = 255;
+                } else {
+                    value = Math.round(255 * (value - lower) / (upper - lower));
+                }
+                
+                // Apply inversion if needed
+                if (isInverted) {
+                    value = 255 - value;
+                }
+                
+                processedData[i] = value;
+            }
+            
+            return processedData;
+        }
+
+        // Update tool button states
+        function updateToolButtons() {
+            const buttons = document.querySelectorAll('.tool-button');
+            buttons.forEach(button => {
+                button.classList.remove('active');
+            });
+            
+            const activeButton = document.getElementById(`${activeTool}Button`);
+            if (activeButton) {
+                activeButton.classList.add('active');
+            }
+        }
+
+        // Reset view parameters
+        function resetViewParameters() {
+            // Don't reset scale here as we'll calculate it based on the image size
+            offsetX = 0;
+            offsetY = 0;
+            windowWidth = 255;
+            windowCenter = 128;
+            isInverted = false;
+        }
+
+        // Update the image with current processing settings
+        function updateImage() {
+            if (!originalImage) return;
+            
+            currentImage = createCornerstoneImage(originalImage.pixelData, originalImage.width, originalImage.height);
+            cornerstone.displayImage(element, currentImage);
+        }
+
+        // Display a message on the viewport
+        function displayMessage(message) {
+            const width = 512;
+            const height = 512;
+            const pixelData = new Uint8Array(width * height);
+            pixelData.fill(0);
+            
+            const messageImage = {
+                imageId: 'message',
+                minPixelValue: 0,
+                maxPixelValue: 255,
+                slope: 1.0,
+                intercept: 0,
+                windowCenter: 128,
+                windowWidth: 255,
+                getPixelData: function() {
+                    return pixelData;
+                },
+                rows: height,
+                columns: width,
+                height: height,
+                width: width,
+                color: false,
+                columnPixelSpacing: 1,
+                rowPixelSpacing: 1,
+                invert: false,
+                sizeInBytes: width * height,
+                getCanvas: function() {
+                    const canvas = document.createElement('canvas');
+                    canvas.width = width;
+                    canvas.height = height;
+                    const ctx = canvas.getContext('2d');
+                    ctx.fillStyle = 'black';
+                    ctx.fillRect(0, 0, width, height);
+                    ctx.fillStyle = 'white';
+                    ctx.font = '20px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.textBaseline = 'middle';
+                    ctx.fillText(message, width / 2, height / 2);
+                    return canvas;
+                }
+            };
+            
+            cornerstone.displayImage(element, messageImage);
+        }
+
+        // Update status message
+        function updateStatus(message, className) {
+            const statusContainer = document.getElementById('statusContainer');
+            statusContainer.innerHTML = statusContainer.innerHTML + `</br><p class="${className}">${message}</p>`;
+        }
+
+        // Detect circle function
+        function detectCircle() {
+            if (!currentImage) {
+                updateStatus('Please load an image first', 'error');
+                return;
+            }
+            
+            // Get the button element
+            const detectButton = document.getElementById('detectCircleButton');
+            
+            // Toggle detection mode
+            if (isDetectingCircle) {
+                // Stop detection mode
+                isDetectingCircle = false;
+                
+                // Update button text
+                detectButton.textContent = 'Detect Circle';
+                
+                // Remove click event listener
+                if (clickHandler) {
+                    element.removeEventListener('click', clickHandler);
+                    clickHandler = null;
+                }
+                
+                return;
+            }
+            
+            // Start detection mode
+            isDetectingCircle = true;
+            
+            // Update button text to indicate active state
+            detectButton.textContent = 'Cancel Detection';
+            
+            // Clear any previous circle
+            clearCircleDetection(false); // Don't reset detection mode since we just set it
+            
+            updateStatus('Click on three points to detect a circle. Points should be on the circular object.', 'info-text');
+            
+            // Create an overlay for the points
+            circleOverlay = document.createElement('div');
+            circleOverlay.id = 'circleOverlay';
+            circleOverlay.style.position = 'absolute';
+            circleOverlay.style.top = '0';
+            circleOverlay.style.left = '0';
+            circleOverlay.style.width = '100%';
+            circleOverlay.style.height = '100%';
+            circleOverlay.style.pointerEvents = 'none';
+            
+            // Create a canvas for drawing the circle
+            circleCanvas = document.createElement('canvas');
+            circleCanvas.id = 'circleCanvas';
+            circleCanvas.style.position = 'absolute';
+            circleCanvas.style.top = '0';
+            circleCanvas.style.left = '0';
+            circleCanvas.style.width = '100%';
+            circleCanvas.style.height = '100%';
+            circleCanvas.style.pointerEvents = 'none';
+            
+            // Set canvas dimensions to match the viewport
+            const viewportRect = element.getBoundingClientRect();
+            circleCanvas.width = viewportRect.width;
+            circleCanvas.height = viewportRect.height;
+            
+            // Add the overlay and canvas to the cornerstone element
+            element.appendChild(circleOverlay);
+            element.appendChild(circleCanvas);
+            
+            // Reset points array
+            circlePoints = [];
+            
+            // Style for the points
+            if (!document.getElementById('pointStyle')) {
+                const pointStyle = document.createElement('style');
+                pointStyle.id = 'pointStyle';
+                pointStyle.textContent = `
+                    .point {
+                        position: absolute;
+                        width: 6px;
+                        height: 6px;
+                        background: red;
+                        border-radius: 50%;
+                        transform: translate(-50%, -50%);
+                        z-index: 10;
+                    }
+                `;
+                document.head.appendChild(pointStyle);
+            }
+            
+            // Enable click events on the cornerstone element
+            element.style.pointerEvents = 'auto';
+            
+            // Click handler function
+            clickHandler = function(e) {
+                // Get click coordinates relative to the viewport
+                const rect = element.getBoundingClientRect();
+                const x = e.clientX - rect.left;
+                const y = e.clientY - rect.top;
+                
+                // If we already have 3 points, clear previous circle and start over
+                if (circlePoints.length >= 3) {
+                    clearCircleDetection(false); // Clear but keep detection mode active
+                    
+                    // Add the new point as the first point of the new circle
+                    circlePoints.push({ x, y });
+                    
+                    // Create and add point element
+                    const pointElement = document.createElement('div');
+                    pointElement.className = 'point';
+                    pointElement.style.left = x + 'px';
+                    pointElement.style.top = y + 'px';
+                    circleOverlay.appendChild(pointElement);
+                    
+                    return;
+                }
+                
+                // Add point to array
+                circlePoints.push({ x, y });
+                
+                // Create and add point element
+                const pointElement = document.createElement('div');
+                pointElement.className = 'point';
+                pointElement.style.left = x + 'px';
+                pointElement.style.top = y + 'px';
+                circleOverlay.appendChild(pointElement);
+                
+                // If we have 3 points, calculate and draw the circle
+                if (circlePoints.length === 3) {
+                    drawCircle();
+                }
+            };
+            
+            // Add click event listener
+            element.addEventListener('click', clickHandler);
+        }
+
+        function drawCircle() {
+            if (circlePoints.length !== 3 || !circleCanvas) return;
+            
+            const ctx = circleCanvas.getContext('2d');
+            const canvasWidth = circleCanvas.width;
+            const canvasHeight = circleCanvas.height;
+            
+            // Calculate circle center and radius using three points
+            const [p1, p2, p3] = circlePoints;
+            
+            // Calculate the center of the circle using the perpendicular bisector method
+            // First, find the midpoints of two line segments
+            const mid1 = { x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2 };
+            const mid2 = { x: (p2.x + p3.x) / 2, y: (p2.y + p3.y) / 2 };
+            
+            // Calculate the slopes of the original lines
+            const slope1 = (p2.y - p1.y) / (p2.x - p1.x);
+            const slope2 = (p3.y - p2.y) / (p3.x - p2.x);
+            
+            // Calculate the slopes of the perpendicular bisectors
+            let perpSlope1 = -1 / slope1;
+            let perpSlope2 = -1 / slope2;
+            
+            // Handle vertical and horizontal lines
+            let center;
+            
+            if (!isFinite(perpSlope1) || !isFinite(perpSlope2)) {
+                // Handle special cases (vertical or horizontal lines)
+                if (!isFinite(perpSlope1)) {
+                    // First line is horizontal, bisector is vertical
+                    const b2 = mid2.y - perpSlope2 * mid2.x;
+                    center = {
+                        x: mid1.x,
+                        y: perpSlope2 * mid1.x + b2
+                    };
+                } else if (!isFinite(perpSlope2)) {
+                    // Second line is horizontal, bisector is vertical
+                    const b1 = mid1.y - perpSlope1 * mid1.x;
+                    center = {
+                        x: mid2.x,
+                        y: perpSlope1 * mid2.x + b1
+                    };
+                } else {
+                    // Both lines are vertical or horizontal - unlikely but handle it
+                    center = { x: mid1.x, y: mid1.y };
+                }
+            } else {
+                // Calculate the y-intercepts of the perpendicular bisectors
+                const b1 = mid1.y - perpSlope1 * mid1.x;
+                const b2 = mid2.y - perpSlope2 * mid2.x;
+                
+                // Calculate the intersection point (center of the circle)
+                const centerX = (b2 - b1) / (perpSlope1 - perpSlope2);
+                const centerY = perpSlope1 * centerX + b1;
+                
+                center = { x: centerX, y: centerY };
+            }
+            
+            // Calculate the radius
+            const radius = Math.sqrt(
+                Math.pow(center.x - p1.x, 2) + Math.pow(center.y - p1.y, 2)
+            );
+            
+            // Store the detected circle
+            detectedCircle = {
+                center: center,
+                radius: radius
+            };
+            
+            // Clear the canvas
+            ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+            
+            // Draw the circle on the canvas
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, radius, 0, 2 * Math.PI);
+            ctx.strokeStyle = 'green';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            // Draw the diameter
+            ctx.strokeStyle = 'green';
+            ctx.beginPath();
+            ctx.moveTo(center.x - radius, center.y); // Start of diameter on left
+            ctx.lineTo(center.x + radius, center.y); // End of diameter on right
+            ctx.stroke();
+            
+            // Mark the center
+            ctx.beginPath();
+            ctx.arc(center.x, center.y, 3, 0, 2 * Math.PI);
+            ctx.fillStyle = 'yellow';
+            ctx.fill();
+            
+            // Calculate diameter
+            const diameter = radius * 2;
+            
+            // Calculate pixel spacing: real-world size (mm) / diameter in pixels
+            pixelSpacingMM = CIRCLE_REAL_SIZE_MM / diameter;
+            
+            // Update status with the calculated pixel spacing and diameter
+            updateStatus(
+                `Circle detected! Diameter: ${diameter.toFixed(2)} pixels, Radius: ${radius.toFixed(2)} pixels. ` +
+                `Pixel spacing: ${pixelSpacingMM.toFixed(4)} mm/pixel.`,
+                'success'
+            );
+            
+            // Enable the calibrate button now that we have a circle
+            document.getElementById('calibrateButton').disabled = false;
+        }
+
+        function clearCircleDetection(resetDetectionMode = true) {
+            // Remove points
+            if (circleOverlay) {
+                const points = circleOverlay.querySelectorAll('.point');
+                points.forEach(point => point.remove());
+            }
+            
+            // Clear canvas
+            if (circleCanvas) {
+                const ctx = circleCanvas.getContext('2d');
+                ctx.clearRect(0, 0, circleCanvas.width, circleCanvas.height);
+            }
+            
+            // Reset points array
+            circlePoints = [];
+            
+            // Reset detection mode if requested
+            if (resetDetectionMode) {
+                stopCircleDetection();
+            }
+        }
+
+        function stopCircleDetection() {
+            // Reset detection state
+            isDetectingCircle = false;
+            
+            // Update button text
+            const detectButton = document.getElementById('detectCircleButton');
+            detectButton.textContent = 'Detect Circle';
+            
+            // Remove click event listener
+            if (clickHandler) {
+                element.removeEventListener('click', clickHandler);
+                clickHandler = null;
+            }
+        }
+
+        function removeCircleElements() {
+            // Remove overlay and canvas elements
+            if (circleOverlay) {
+                circleOverlay.remove();
+                circleOverlay = null;
+            }
+            
+            if (circleCanvas) {
+                circleCanvas.remove();
+                circleCanvas = null;
+            }
+        }
+        
+        // New function to calibrate the image
+        function calibrateImage() {
+            if (!originalImage || !detectedCircle || !pixelSpacingMM) {
+                updateStatus('Please detect a circle first to calibrate the image.', 'error');
+                return;
+            }
+            
+            try {
+                // Create a canvas to draw the calibrated image
+                const canvas = document.createElement('canvas');
+                canvas.width = originalImage.width;
+                canvas.height = originalImage.height;
+                const ctx = canvas.getContext('2d');
+                
+                // Create an image data object for the calibrated image
+                const calibratedImageData = ctx.createImageData(originalImage.width, originalImage.height);
+                
+                // Copy the original image data to the calibrated image
+                const originalRGBA = originalImage.imageData.data;
+                const calibratedRGBA = calibratedImageData.data;
+                
+                for (let i = 0; i < originalRGBA.length; i++) {
+                    calibratedRGBA[i] = originalRGBA[i];
+                }
+                
+                // Put the image data on the canvas
+                ctx.putImageData(calibratedImageData, 0, 0);
+                
+                // Draw the calibration circle on the canvas
+                // We need to adjust the circle coordinates from viewport to image coordinates
+                const viewportRect = element.getBoundingClientRect();
+                const viewportScale = scale;
+                
+                // Calculate the circle center and radius in image coordinates
+                const centerX = detectedCircle.center.x / viewportScale;
+                const centerY = detectedCircle.center.y / viewportScale;
+                const radiusInImage = detectedCircle.radius / viewportScale;
+                
+                // Draw the circle on the canvas
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, radiusInImage, 0, 2 * Math.PI);
+                ctx.strokeStyle = 'yellow';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                
+                // Mark the center
+                ctx.beginPath();
+                ctx.arc(centerX, centerY, 3, 0, 2 * Math.PI);
+                ctx.fillStyle = 'green';
+                ctx.fill();
+                
+                // Add text with the calibration information
+                ctx.font = '16px Arial';
+                ctx.fillStyle = 'white';
+                ctx.strokeStyle = 'black';
+                ctx.lineWidth = 0.5;
+                const text = `Calibration: 1 pixel = ${pixelSpacingMM.toFixed(4)} mm`;
+                ctx.fillText(text, 10, 30);
+                ctx.strokeText(text, 10, 30);
+                
+                // Convert the canvas to a data URL
+                const dataURL = canvas.toDataURL('image/png');
+                
+                // Display the calibrated image
+                const calibratedImage = document.getElementById('calibratedImage');
+                calibratedImage.src = dataURL;
+                
+                // Show the calibrated image container
+                document.getElementById('calibratedImageContainer').style.display = 'block';
+                
+                // Update status
+                updateStatus(
+                    `Image calibrated successfully. Scale factor: 1 pixel = ${pixelSpacingMM.toFixed(4)} mm.`,
+                    'success'
+                );
+                
+            } catch (error) {
+                console.error(error);
+                updateStatus(`Error calibrating image: ${error.message}`, 'error');
+            }
+        }
+    </script>
+</body>
+</html>
